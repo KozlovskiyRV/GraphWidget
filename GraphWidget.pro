@@ -5,3 +5,5 @@ SUBDIRS +=  graphwidget \
             graphwidgetplugin
 
 graphwidgetplugin.depends = graphwidget
+
+DISTFILES += dest.pri
