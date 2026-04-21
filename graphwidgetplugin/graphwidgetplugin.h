@@ -1,7 +1,7 @@
 #ifndef GRAPHWIDGETPLUGIN_H
 #define GRAPHWIDGETPLUGIN_H
 
-#include <QDesignerCustomWidgetInterface>
+#include <QtUiPlugin/customwidget.h>
 
 class GraphWidgetPlugin : public QObject, public QDesignerCustomWidgetInterface
 {
