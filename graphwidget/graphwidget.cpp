@@ -4,153 +4,37 @@
 #include <QOpenGLShader>
 #include <QVector4D>
 #include <QtMath>
-#include <algorithm>
 
 namespace {
 constexpr float kMinZoom = 1e-9f;
 constexpr float kPaddingRatioY = 0.02f;
 }
 
-GraphData::GraphData()
-    : vbo(QOpenGLBuffer::VertexBuffer) {
-}
-
-void GraphData::initializeGl() {
-    if (!vbo.isCreated()) {
-        vbo.create();
-    }
-    vbo.bind();
-    vbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
-    if (m_capacity > 0) {
-        vbo.allocate(m_capacity * static_cast<int>(sizeof(QVector2D)));
-        uploadFull();
-    }
-    vbo.release();
-}
-
-void GraphData::setCapacity(int newCapacity) {
-    m_capacity = std::max(1, newCapacity);
-    m_points.resize(m_capacity);
-    m_head = 0;
-    m_size = 0;
-
-    if (vbo.isCreated()) {
-        vbo.bind();
-        vbo.allocate(m_capacity * static_cast<int>(sizeof(QVector2D)));
-        vbo.release();
-    }
-}
-
-void GraphData::setPoints(const QVector<QVector2D> &newPoints) {
-    if (m_capacity <= 0) {
-        return;
-    }
-
-    const int keepCount = std::min(static_cast<int>(newPoints.size()), m_capacity);
-    m_head = 0;
-    m_size = keepCount;
-
-    const int start = newPoints.size() - keepCount;
-    for (int i = 0; i < keepCount; ++i) {
-        m_points[i] = newPoints[start + i];
-    }
-
-    uploadFull();
-}
-
-void GraphData::appendPoint(const QVector2D &point) {
-    if (m_capacity <= 0 || !vbo.isCreated()) {
-        return;
-    }
-
-    if (m_size < m_capacity) {
-        const int tail = (m_head + m_size) % m_capacity;
-        m_points[tail] = point;
-        ++m_size;
-
-        vbo.bind();
-        vbo.write(tail * static_cast<int>(sizeof(QVector2D)), &point, static_cast<int>(sizeof(QVector2D)));
-        vbo.release();
-        return;
-    }
-
-    m_points[m_head] = point;
-    vbo.bind();
-    vbo.write(m_head * static_cast<int>(sizeof(QVector2D)), &point, static_cast<int>(sizeof(QVector2D)));
-    vbo.release();
-    m_head = (m_head + 1) % m_capacity;
-}
-
-int GraphData::size() const {
-    return m_size;
-}
-
-int GraphData::firstChunkSize() const {
-    if (m_size == 0) {
-        return 0;
-    }
-
-    return std::min(m_size, m_capacity - m_head);
-}
-
-int GraphData::secondChunkSize() const {
-    return m_size - firstChunkSize();
-}
-
-int GraphData::firstChunkStartIndex() const {
-    return m_head;
-}
-
-const QVector<QVector2D> &GraphData::points() const {
-    return m_points;
-}
-
-void GraphData::clear() {
-    m_head = 0;
-    m_size = 0;
-}
-
-void GraphData::uploadFull() {
-    if (!vbo.isCreated()) {
-        return;
-    }
-
-    vbo.bind();
-    if (m_size > 0) {
-        vbo.write(0, m_points.constData(), m_size * static_cast<int>(sizeof(QVector2D)));
-    }
-    vbo.release();
-}
-
 GraphWidget::GraphWidget(QWidget *parent)
-    : QOpenGLWidget(parent)
-    , overlayVbo(QOpenGLBuffer::VertexBuffer) {
+    : QOpenGLWidget(parent),
+    grid{10000.0f, 100.0f},
+    zoom{1.0f / grid.x(), 1.0f / grid.y()},
+    offset{-1.0f, -0.5f} {
 }
 
 GraphWidget::~GraphWidget() {
     makeCurrent();
-    overlayVbo.destroy();
-    for (GraphData &graph : graphs) {
-        graph.vbo.destroy();
-    }
+    m_gridVBO.destroy();
+    shaderProgram.removeAllShaders();
+    for (auto *g : graphs)
+        delete g;
     doneCurrent();
 }
 
-int GraphWidget::addGraph(const QVector<QVector2D> &data, const QVector3D &color, float lineWidth, int capacity) {
+int GraphWidget::addGraph(const QVector<QVector2D> &data, const QVector3D color, float lineWidth, size_t capacity) {
     makeCurrent();
-
-    GraphData graph;
-    graph.color = color;
-    graph.lineWidth = lineWidth;
-    graph.setCapacity(capacity);
-    graph.initializeGl();
-    graph.setPoints(data);
-
-    graphs.append(std::move(graph));
-
+    auto *gd = new GraphData{data, color, lineWidth, capacity};
+    graphs.append(gd);
     doneCurrent();
-    update();
     return graphs.size() - 1;
+}
+int GraphWidget::addGraph(const QVector3D color, float lineWidth, size_t capacity) {
+    return addGraph({}, color, lineWidth, capacity);
 }
 
 void GraphWidget::addPointToGraph(int graphIndex, const QVector2D &point) {
@@ -159,41 +43,34 @@ void GraphWidget::addPointToGraph(int graphIndex, const QVector2D &point) {
         return;
     }
 
-    GraphData &graph = graphs[graphIndex];
-    graph.appendPoint(point);
+    makeCurrent();
+    graphs[graphIndex]->appendPoint(point);
+    doneCurrent();
 
-    const float x = point.x();
-    const float y = point.y();
-
-    if (isPointsPresent) {
-        pointMaxX = std::max(pointMaxX, x);
-        pointMinX = std::min(pointMinX, x);
-        pointMaxY = std::max(pointMaxY, y);
-        pointMinY = std::min(pointMinY, y);
-    } else {
+    if (!isPointsPresent) {
+        chartRect = QRectF(point.x(), point.y(), 0, 0);
         isPointsPresent = true;
-        pointMaxX = x;
-        pointMinX = x;
-        pointMaxY = y;
-        pointMinY = y;
+    } else {
+        chartRect = chartRect.united(QRectF(point.x(), point.y(), 0, 0));
     }
-
+// pointMinX, pointMaxX, pointMinY, pointMaxY - chartRect
+// maxX, minX, maxY, minY - widgetRect
     if (isAutoScale) {
-        const float paddingY = kPaddingRatioY * std::max(qAbs(pointMaxY - pointMinY), 1.0f);
-        adjustByMinX(pointMinX, false);
-        adjustByMaxX(pointMaxX, false);
-        adjustByMinY(pointMinY - paddingY, false);
-        adjustByMaxY(pointMaxY + paddingY, false);
+        const float paddingY = kPaddingRatioY * qMax(chartRect.height(), 1.0f);
+        adjustByMinX(chartRect.left(), false);
+        adjustByMaxX(chartRect.right(), false);
+        adjustByMinY(chartRect.bottom() - paddingY, false);
+        adjustByMaxY(chartRect.top() + paddingY, false);
     } else {
         if (isFollow && lastVisiblePeriod > 0.0f) {
-            const float periodMinX = (pointMaxX - pointMinX > lastVisiblePeriod) ? (pointMaxX - lastVisiblePeriod) : pointMinX;
+            const float periodMinX = (chartRect.width() > lastVisiblePeriod) ? (chartRect.right() - lastVisiblePeriod) : chartRect.left();
             adjustByMinX(periodMinX, false);
             adjustByMaxX(periodMinX + lastVisiblePeriod, false);
         }
         if (isAutoScaleY) {
-            const float paddingY = kPaddingRatioY * std::max(qAbs(pointMaxY - pointMinY), 1.0f);
-            adjustByMinY(pointMinY - paddingY, false);
-            adjustByMaxY(pointMaxY + paddingY, false);
+            const float paddingY = kPaddingRatioY * qMax(chartRect.height(), 1.0f);
+            adjustByMinY(chartRect.left() - paddingY, false);
+            adjustByMaxY(chartRect.right() + paddingY, false);
         }
     }
 
@@ -231,14 +108,10 @@ void GraphWidget::initializeGL() {
         qWarning("Error while creating shader program");
     }
 
-    overlayVbo.create();
-    overlayVbo.bind();
-    overlayVbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
-    overlayVbo.release();
-
-    for (GraphData &graph : graphs) {
-        graph.initializeGl();
-    }
+    m_gridVBO.create();
+    m_gridVBO.bind();
+    m_gridVBO.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+    m_gridVBO.release();
 
     emit initialized();
 }
@@ -247,21 +120,34 @@ void GraphWidget::resizeGL(int w, int h) {
     glViewport(0, 0, w, h);
 }
 
-void GraphWidget::evalBoundaries() {
-    const float safeZoomX = (qAbs(zoomX) < kMinZoom) ? ((zoomX >= 0.0f) ? kMinZoom : -kMinZoom) : zoomX;
-    const float safeZoomY = (qAbs(zoomY) < kMinZoom) ? ((zoomY >= 0.0f) ? kMinZoom : -kMinZoom) : zoomY;
+inline void GraphWidget::evalBoundaries() {
+    widgetRect = (QRectF(-1.0f, -1.0f, 2.0f, 2.0f) - offset) / zoom;
 
-    minX = (-1.0f - offsetX) / safeZoomX;
-    maxX = (1.0f - offsetX) / safeZoomX;
-    minY = (-1.0f - offsetY) / safeZoomY;
-    maxY = (1.0f - offsetY) / safeZoomY;
+    QVector<QVector2D> gridLines;
+    // Вертикальные линии сетки
+    float startX = std::floor(widgetRect.left() / grid.x()) * grid.x();
+    for (float x = startX; x <= widgetRect.right(); x += grid.x()) {
+        gridLines.append(QVector2D(x, widgetRect.top()));
+        gridLines.append(QVector2D(x, widgetRect.bottom()));
+    }
+    // Горизонтальные линии сетки
+    float startY = std::floor(widgetRect.top() / grid.y()) * grid.y();
+    for (float y = startY; y <= widgetRect.bottom(); y += grid.y()) {
+        gridLines.append(QVector2D(widgetRect.left(), y));
+        gridLines.append(QVector2D(widgetRect.right(), y));
+    }
 
-    if (minX > maxX) {
-        std::swap(minX, maxX);
-    }
-    if (minY > maxY) {
-        std::swap(minY, maxY);
-    }
+    // Оси
+    gridLines.append(QVector2D(widgetRect.left(), 0));
+    gridLines.append(QVector2D(widgetRect.right(), 0));
+    gridLines.append(QVector2D(0, widgetRect.top()));
+    gridLines.append(QVector2D(0, widgetRect.bottom()));
+
+    makeCurrent();
+    m_gridVBO.bind();
+    m_gridVBO.allocate(gridLines.constData(), gridLines.size() * sizeof(QVector2D));
+    m_gridVBO.release();
+    doneCurrent();
 }
 
 void GraphWidget::markBoundariesChanged() {
@@ -269,103 +155,42 @@ void GraphWidget::markBoundariesChanged() {
     evalBoundaries();
 }
 
-void GraphWidget::emitBoundariesIfNeeded() {
-    if (!areBoundariesChanged) {
-        return;
-    }
-
-    areBoundariesChanged = false;
-    emit boundariesChanged(minX, maxX, minY, maxY);
-}
-
-void GraphWidget::drawOverlay(const QMatrix4x4 &transform) {
-    QVector<QVector2D> lines;
-
-    const float startX = std::floor(minX / gridX) * gridX;
-    for (float x = startX; x <= maxX; x += gridX) {
-        lines.append({x, minY});
-        lines.append({x, maxY});
-    }
-
-    const float startY = std::floor(minY / gridY) * gridY;
-    for (float y = startY; y <= maxY; y += gridY) {
-        lines.append({minX, y});
-        lines.append({maxX, y});
-    }
-
-    lines.append({0.0f, minY});
-    lines.append({0.0f, maxY});
-    lines.append({minX, 0.0f});
-    lines.append({maxX, 0.0f});
-
-    overlayVbo.bind();
-    overlayVbo.allocate(lines.constData(), lines.size() * static_cast<int>(sizeof(QVector2D)));
-
-    shaderProgram.setUniformValue("transform", transform);
-
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-    glEnableVertexAttribArray(0);
-
-    const int gridVertices = lines.size() - 4;
-    shaderProgram.setUniformValue("color", QVector3D(0.7f, 0.7f, 0.7f));
-    glLineWidth(1.0f);
-    glDrawArrays(GL_LINES, 0, gridVertices);
-
-    shaderProgram.setUniformValue("color", QVector3D(1.0f, 1.0f, 1.0f));
-    glLineWidth(2.0f);
-    glDrawArrays(GL_LINES, gridVertices, 4);
-
-    glDisableVertexAttribArray(0);
-    overlayVbo.release();
-}
-
 void GraphWidget::paintGL() {
-    const float safeZoomX = std::max(qAbs(zoomX), kMinZoom);
-    const float safeZoomY = std::max(qAbs(zoomY), kMinZoom);
-    zoomX = (zoomX >= 0.0f) ? safeZoomX : -safeZoomX;
-    zoomY = (zoomY >= 0.0f) ? safeZoomY : -safeZoomY;
-
     QMatrix4x4 transform;
     transform.ortho(-1, 1, -1, 1, -1, 1);
-    transform.translate(offsetX, offsetY);
-    transform.scale(zoomX, zoomY);
+    transform.translate(offset.x(), offset.y());
+    transform.scale(zoom.x(), zoom.y());
 
-    evalBoundaries();
-    emitBoundariesIfNeeded();
+    if (areBoundariesChanged) {
+        areBoundariesChanged = false;
+        emit boundariesChanged(widgetRect.left(), widgetRect.right(), widgetRect.top(), widgetRect.bottom());
+    }
 
     glClear(GL_COLOR_BUFFER_BIT);
 
     shaderProgram.bind();
-    drawOverlay(transform);
-
     shaderProgram.setUniformValue("transform", transform);
 
-    for (GraphData &graph : graphs) {
-        if (graph.size() == 0) {
-            continue;
-        }
+    int positionLocation = shaderProgram.attributeLocation("position");
 
-        shaderProgram.setUniformValue("color", graph.color);
-        glLineWidth(graph.lineWidth);
+    // Рисование сетки
+    m_gridVBO.bind();
+        shaderProgram.enableAttributeArray(positionLocation);
+        shaderProgram.setAttributeBuffer(positionLocation, GL_FLOAT, 0, 2, 0);
 
-        graph.vbo.bind();
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-        glEnableVertexAttribArray(0);
+        glLineWidth(0.7f);
+        shaderProgram.setUniformValue("color", QVector3D(0.7f, 0.7f, 0.7f));
+        int gridVertexCount = m_gridVBO.size() / sizeof(QVector2D) - 4;
+        glDrawArrays(GL_LINES, 0, gridVertexCount);
 
-        const int firstSize = graph.firstChunkSize();
-        const int secondSize = graph.secondChunkSize();
-        const int firstStart = graph.firstChunkStartIndex();
+        glLineWidth(2.0f);
+        shaderProgram.setUniformValue("color", QVector3D(1, 1, 1));
+        glDrawArrays(GL_LINES, gridVertexCount, 4);
+        shaderProgram.disableAttributeArray(positionLocation);
+    m_gridVBO.release();
 
-        if (firstSize > 1) {
-            glDrawArrays(GL_LINE_STRIP, firstStart, firstSize);
-        }
-        if (secondSize > 1) {
-            glDrawArrays(GL_LINE_STRIP, 0, secondSize);
-        }
-
-        glDisableVertexAttribArray(0);
-        graph.vbo.release();
-    }
+    for (auto *graph : graphs)
+        graph->render(shaderProgram, positionLocation);
 
     shaderProgram.release();
 }
@@ -391,15 +216,13 @@ void GraphWidget::mouseMoveEvent(QMouseEvent *event) {
     isAutoScale = false;
     emit autoScaleCleared();
 
-    const QPointF delta = event->position() - QPointF(lastMousePos);
-    if (!isFollow && width() > 0) {
-        offsetX += 2.0f * static_cast<float>(delta.x()) / static_cast<float>(width());
-    }
-    if (!isAutoScaleY && height() > 0) {
-        offsetY -= 2.0f * static_cast<float>(delta.y()) / static_cast<float>(height());
-    }
+    const QPointF delta = event->position() - lastMousePos;
+    if (!isFollow && width() > 0)
+        offset.setX(offset.x() + 2.0f * delta.x() / width());
+    if (!isAutoScaleY && height() > 0)
+        offset.setY(offset.y() - 2.0f * delta.y() / height());
 
-    lastMousePos = event->position().toPoint();
+    lastMousePos = event->position();
     markBoundariesChanged();
     update();
 }
@@ -411,23 +234,22 @@ void GraphWidget::wheelEvent(QWheelEvent *event) {
     const float scaleFactor = (event->angleDelta().y() > 0) ? 1.1f : 0.9f;
     const QPointF mouseCenter = event->position();
 
-    const float sx = 2.0f * static_cast<float>(mouseCenter.x()) / std::max(1, width()) - 1.0f;
-    const float sy = 1.0f - 2.0f * static_cast<float>(mouseCenter.y()) / std::max(1, height());
+    const QPointF s{2.0f * mouseCenter.x() / width() - 1.0f,
+                    1.0f - 2.0f * mouseCenter.y() / height()};
 
-    const float centerX = (sx - offsetX) / std::max(qAbs(zoomX), kMinZoom);
-    const float centerY = (sy - offsetY) / std::max(qAbs(zoomY), kMinZoom);
+    const QPointF center = (s - offset) / zoom;
 
     if (event->modifiers() == Qt::ControlModifier) {
-        zoomX *= scaleFactor;
+        setZoomX(zoom.x() * scaleFactor);
     } else if (event->modifiers() == Qt::ShiftModifier) {
-        zoomY *= scaleFactor;
+        setZoomY(zoom.y() * scaleFactor);
     } else {
-        zoomX *= scaleFactor;
-        zoomY *= scaleFactor;
+        setZoom(zoom * scaleFactor);
     }
 
-    offsetX = sx - centerX * zoomX;
-    offsetY = sy - centerY * zoomY;
+    QPointF r = s - center * zoom;
+    offset.setX(r.x());
+    offset.setY(r.y());
 
     markBoundariesChanged();
     update();
@@ -438,17 +260,16 @@ void GraphWidget::clear() {
     emit autoScaleCleared();
     isPointsPresent = false;
 
-    for (GraphData &graph : graphs) {
-        graph.clear();
-    }
+    for (auto *graph : graphs)
+        graph->clear();
 
     update();
 }
 
 void GraphWidget::adjustByMinX(float newMinX, bool isToUpdate) {
-    if (maxX > newMinX) {
-        zoomX = 2.0f / (maxX - newMinX);
-        offsetX = -1.0f - newMinX * zoomX;
+    if (widgetRect.left() > newMinX) {
+        zoom.setX( 2.0f / (widgetRect.right() - newMinX) );
+        offset.setX( -1.0f - newMinX * zoom.x() );
         markBoundariesChanged();
 
         if (isToUpdate) {
@@ -460,9 +281,9 @@ void GraphWidget::adjustByMinX(float newMinX, bool isToUpdate) {
 }
 
 void GraphWidget::adjustByMaxX(float newMaxX, bool isToUpdate) {
-    if (newMaxX > minX) {
-        zoomX = 2.0f / (newMaxX - minX);
-        offsetX = -1.0f - minX * zoomX;
+    if (newMaxX > widgetRect.left()) {
+        zoom.setX( 2.0f / (newMaxX - widgetRect.left()) );
+        offset.setX( -1.0f - widgetRect.left() * zoom.x() );
         markBoundariesChanged();
 
         if (isToUpdate) {
@@ -474,9 +295,9 @@ void GraphWidget::adjustByMaxX(float newMaxX, bool isToUpdate) {
 }
 
 void GraphWidget::adjustByMinY(float newMinY, bool isToUpdate) {
-    if (maxY > newMinY) {
-        zoomY = 2.0f / (maxY - newMinY);
-        offsetY = -1.0f - newMinY * zoomY;
+    if (widgetRect.bottom() > newMinY) {
+        zoom.setY( 2.0f / (widgetRect.bottom() - newMinY) );
+        offset.setY( -1.0f - newMinY * zoom.y() );
         markBoundariesChanged();
 
         if (isToUpdate) {
@@ -488,9 +309,9 @@ void GraphWidget::adjustByMinY(float newMinY, bool isToUpdate) {
 }
 
 void GraphWidget::adjustByMaxY(float newMaxY, bool isToUpdate) {
-    if (newMaxY > minY) {
-        zoomY = 2.0f / (newMaxY - minY);
-        offsetY = -1.0f - minY * zoomY;
+    if (newMaxY > widgetRect.top()) {
+        zoom.setY( 2.0f / (newMaxY - widgetRect.top()) );
+        offset.setY( -1.0f - widgetRect.top() * zoom.y() );
         markBoundariesChanged();
 
         if (isToUpdate) {
@@ -507,61 +328,79 @@ void GraphWidget::setAutoScale(bool is) {
         return;
     }
 
-    const float paddingY = kPaddingRatioY * std::max(qAbs(pointMaxY - pointMinY), 1.0f);
-    adjustByMinX(pointMinX, false);
-    adjustByMaxX(pointMaxX, false);
-    adjustByMinY(pointMinY - paddingY, false);
-    adjustByMaxY(pointMaxY + paddingY, false);
+    const float paddingY = kPaddingRatioY * qMax(chartRect.height(), 1.0f);
+    adjustByMinX(chartRect.left(), false);
+    adjustByMaxX(chartRect.right(), false);
+    adjustByMinY(chartRect.bottom() - paddingY, false);
+    adjustByMaxY(chartRect.top() + paddingY, false);
 
     update();
 }
 
-void GraphWidget::setZoom(QVector2D zoom) {
-    isAutoScale = false;
-    emit autoScaleCleared();
-    zoomX = zoom.x();
-    zoomY = zoom.y();
+void GraphWidget::setZoom(QVector2D newZoom, bool isToUpdate) {
+    zoom.setX( qMax(qAbs(newZoom.x()), kMinZoom) );
+    zoom.setY( qMax(qAbs(newZoom.y()), kMinZoom) );
     markBoundariesChanged();
-    update();
+
+    if (isToUpdate) {
+        isAutoScale = false;
+        emit autoScaleCleared();
+        update();
+    }
 }
 
-void GraphWidget::setZoomX(float zoom) {
-    isAutoScale = false;
-    emit autoScaleCleared();
-    zoomX = zoom;
+void GraphWidget::setZoomX(float zoomX, bool isToUpdate) {
+    zoom.setX( qMax(qAbs(zoomX), kMinZoom) );
     markBoundariesChanged();
-    update();
+
+    if (isToUpdate) {
+        isAutoScale = false;
+        emit autoScaleCleared();
+        update();
+    }
 }
 
-void GraphWidget::setZoomY(float zoom) {
-    isAutoScale = false;
-    emit autoScaleCleared();
-    zoomY = zoom;
+void GraphWidget::setZoomY(float zoomY, bool isToUpdate) {
+    zoom.setY( qMax(qAbs(zoomY), kMinZoom) );
     markBoundariesChanged();
-    update();
+
+    if (isToUpdate) {
+        isAutoScale = false;
+        emit autoScaleCleared();
+        update();
+    }
 }
 
-void GraphWidget::setOffset(QVector2D offset) {
-    isAutoScale = false;
-    emit autoScaleCleared();
-    offsetX = offset.x();
-    offsetY = offset.y();
+void GraphWidget::setOffset(QVector2D newOffset, bool isToUpdate) {
+    offset.setX( newOffset.x() );
+    offset.setY( newOffset.y() );
     markBoundariesChanged();
-    update();
+
+    if (isToUpdate) {
+        isAutoScale = false;
+        emit autoScaleCleared();
+        update();
+    }
 }
 
-void GraphWidget::setOffsetX(float offset) {
-    isAutoScale = false;
-    emit autoScaleCleared();
-    offsetX = offset;
+void GraphWidget::setOffsetX(float offsetX, bool isToUpdate) {
+    offset.setX( offsetX );
     markBoundariesChanged();
-    update();
+
+    if (isToUpdate) {
+        isAutoScale = false;
+        emit autoScaleCleared();
+        update();
+    }
 }
 
-void GraphWidget::setOffsetY(float offset) {
-    isAutoScale = false;
-    emit autoScaleCleared();
-    offsetY = offset;
+void GraphWidget::setOffsetY(float offsetY, bool isToUpdate) {
+    offset.setY( offsetY );
     markBoundariesChanged();
-    update();
+
+    if (isToUpdate) {
+        isAutoScale = false;
+        emit autoScaleCleared();
+        update();
+    }
 }

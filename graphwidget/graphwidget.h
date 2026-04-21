@@ -9,41 +9,50 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QVector>
+#include <QPointF>
 #include <QVector2D>
 #include <QVector3D>
+#include <QRectF>
+#include "graphdata.h"
 
-class GraphData {
-public:
-    GraphData();
+inline QRectF operator/(const QRectF &rect, const QVector2D &zoom) {
+    return QRectF(rect.left() / zoom.x(),
+                  rect.top() / zoom.y(),
+                  rect.width() / zoom.x(),
+                  rect.height() / zoom.y());
+}
 
-    void initializeGl();
-    void clear();
+inline QRectF operator-(const QRectF &rect, const QVector2D &zoom) {
+    return QRectF(rect.left() - zoom.x(),
+                  rect.top() - zoom.y(),
+                  rect.width(),
+                  rect.height());
+}
 
-    void setCapacity(int newCapacity);
-    void setPoints(const QVector<QVector2D> &newPoints);
+inline QPointF operator-(const QPointF &point, const QVector2D &zoom) {
+    return QPointF(point.x() - zoom.x(),
+                   point.y() - zoom.y());
+}
 
-    void appendPoint(const QVector2D &point);
+inline QPointF operator/(const QPointF &point, const QVector2D &zoom) {
+    return QPointF(point.x() / zoom.x(),
+                   point.y() / zoom.y());
+}
 
-    int size() const;
-    int firstChunkSize() const;
-    int secondChunkSize() const;
-    int firstChunkStartIndex() const;
+inline QPointF operator*(const QPointF &point, const QVector2D &zoom) {
+    return QPointF(point.x() * zoom.x(),
+                   point.y() * zoom.y());
+}
 
-    const QVector<QVector2D> &points() const;
+inline QVector2D operator/(const QVector2D &point, const QVector2D &zoom) {
+    return QVector2D(point.x() / zoom.x(),
+                     point.y() / zoom.y());
+}
 
-    QVector3D color = {0.1f, 0.8f, 0.2f};
-    float lineWidth = 1.0f;
-
-    QOpenGLBuffer vbo;
-
-private:
-    QVector<QVector2D> m_points;
-    int m_capacity = 0;
-    int m_head = 0;
-    int m_size = 0;
-
-    void uploadFull();
-};
+inline QVector2D operator*(const QVector2D &point, const QVector2D &zoom) {
+    return QVector2D(point.x() * zoom.x(),
+                     point.y() * zoom.y());
+}
 
 class GraphWidget : public QOpenGLWidget, protected QOpenGLFunctions {
     Q_OBJECT
@@ -52,7 +61,9 @@ public:
     explicit GraphWidget(QWidget *parent = nullptr);
     ~GraphWidget() override;
 
-    int addGraph(const QVector<QVector2D> &data, const QVector3D &color, float lineWidth = 1.0f, int capacity = 100000);
+    int addGraph(const QVector<QVector2D> &data, const QVector3D color = {1.0f, 0.0f, 1.0f}, float lineWidth = 1.0f, size_t capacity = 100000);
+    int addGraph(const QVector3D color = {1.0f, 0.0f, 1.0f}, float lineWidth = 1.0f, size_t capacity = 100000);
+
     void addPointToGraph(int graphIndex, const QVector2D &point);
 
     void setAutoScale(bool is);
@@ -62,13 +73,13 @@ public:
     void adjustByMaxX(float maxX, bool isToUpdate = true);
     void adjustByMaxY(float maxY, bool isToUpdate = true);
 
-    void setZoom(QVector2D zoom);
-    void setZoomX(float zoom);
-    void setZoomY(float zoom);
+    void setZoom(QVector2D zoom, bool isToUpdate = true);
+    void setZoomX(float zoom, bool isToUpdate = true);
+    void setZoomY(float zoom, bool isToUpdate = true);
 
-    void setOffset(QVector2D offset);
-    void setOffsetX(float offset);
-    void setOffsetY(float offset);
+    void setOffset(QVector2D offset, bool isToUpdate = true);
+    void setOffsetX(float offset, bool isToUpdate = true);
+    void setOffsetY(float offset, bool isToUpdate = true);
 
     void clear();
 
@@ -89,27 +100,17 @@ protected:
 
 private:
     QOpenGLShaderProgram shaderProgram;
-    QOpenGLBuffer overlayVbo;
-    QVector<GraphData> graphs;
+    QVector<GraphData*> graphs;
+    QOpenGLBuffer m_gridVBO;
 
-    float gridX = 10000.0f;
-    float gridY = 100.0f;
-    float zoomX = 1.0f / gridX;
-    float zoomY = 1.0f / gridY;
-    float offsetX = -1.0f;
-    float offsetY = -0.5f;
+    QVector2D grid;
+    QVector2D zoom;
+    QVector2D offset;
 
-    float minX = 0.0f;
-    float minY = 0.0f;
-    float maxX = 0.0f;
-    float maxY = 0.0f;
+    QRectF widgetRect;
+    QRectF chartRect;
 
-    float pointMinX = 0.0f;
-    float pointMinY = 0.0f;
-    float pointMaxX = 0.0f;
-    float pointMaxY = 0.0f;
-
-    QPoint lastMousePos;
+    QPointF lastMousePos;
     bool isDragging = false;
     bool areBoundariesChanged = true;
     bool isAutoScale = true;
@@ -120,8 +121,6 @@ private:
 
     void evalBoundaries();
     void markBoundariesChanged();
-    void drawOverlay(const QMatrix4x4 &transform);
-    void emitBoundariesIfNeeded();
 };
 
 #endif // GRAPHWIDGET_H

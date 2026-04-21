@@ -4,7 +4,12 @@ QT += widgets opengl openglwidgets
 
 TARGET = graphwidget
 
-HEADERS += graphwidget.h
-SOURCES += graphwidget.cpp
+include(../dest.pri)
+
+HEADERS +=  graphwidget.h \
+            graphdata.h
+
+SOURCES +=  graphwidget.cpp \
+            graphdata.cpp
 
 INCLUDEPATH += $$PWD
