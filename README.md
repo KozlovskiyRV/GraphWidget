@@ -57,38 +57,47 @@ gw->adjustByMaxY(5.0f);
 Добавьте путь к исходникам виджета и необходимые зависимости:
 
 ```qmake
-QT       += core gui widgets opengl
+QT       += core gui widgets opengl openglwidgets
 
-INCLUDEPATH += $$PWD/GraphWidget/graphwidget
-SOURCES    += $$PWD/GraphWidget/graphwidget/graphdata.cpp \
-               $$PWD/GraphWidget/graphwidget/graphwidget.cpp
-HEADERS    += $$PWD/GraphWidget/graphwidget/graphdata.h \
-               $$PWD/GraphWidget/graphwidget/graphwidget.h
+IMPORTED_WIDGETS_PATH = $$PWD/external_widgets
 
-# Обязательно для Windows — линковка с OpenGL
-win32:LIBS += -lopengl32
-unix:!macx:LIBS += -lGL
-macx:LIBS += -framework OpenGL
+INCLUDEPATH += IMPORTED_WIDGETS_PATH
+
+# Обязательно — линковка с OpenGL
+win32:LIBS += -L$$IMPORTED_WIDGETS_PATH -lgraphwidget -lopengl32
+unix:!macx:LIBS += -L$$IMPORTED_WIDGETS_PATH -lgraphwidget -lGL
+macx:LIBS += -L$$IMPORTED_WIDGETS_PATH -lgraphwidget -framework OpenGL
 ```
 
 ### CMake
 
 ```cmake
-find_package(Qt5 REQUIRED COMPONENTS Widgets OpenGL)
+find_package(Qt5 REQUIRED COMPONENTS Widgets OpenGLWidgets)
 find_package(OpenGL REQUIRED)
 
-add_executable(MyApp
-    main.cpp
-    ${CMAKE_SOURCE_DIR}/GraphWidget/graphwidget/graphdata.cpp
-    ${CMAKE_SOURCE_DIR}/GraphWidget/graphwidget/graphwidget.cpp
+function(add_external_lib NAME PATH)
+    find_library(LIB_PATH ${NAME} PATHS ${PATH} NO_DEFAULT_PATH)
+    add_library(${NAME} STATIC IMPORTED)
+    set_target_properties(${NAME} PROPERTIES
+        IMPORTED_LOCATION "${LIB_PATH}"
+        INTERFACE_INCLUDE_DIRECTORIES "${PATH}"
+    )
+    unset(LIB_PATH CACHE)
+endfunction()
+
+set(IMPORTED_WIDGETS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external_widgets")
+add_external_lib(GraphWidget  ${IMPORTED_WIDGETS_PATH})
+
+target_include_directories(MyApp PRIVATE IMPORTED_WIDGETS_PATH)
+
+target_link_libraries(MyApp PRIVATE
+    GraphWidget        # ПЕРЕД остальными
+    OpenGL::GL
+    Qt::Core
+    Qt::Widgets
+    Qt6::OpenGLWidgets
 )
 
-target_include_directories(MyApp PRIVATE ${CMAKE_SOURCE_DIR}/GraphWidget/graphwidget)
-target_link_libraries(MyApp
-    Qt5::Widgets
-    Qt5::OpenGL
-    OpenGL::GL
-)
 ```
 
 > **Примечание:** Библиотека виджета выделена в отдельную статическую сборку, поэтому в ваш проект включаются двоичные файлы. Зависимость `OpenGL::GL` (или `-lopengl32`) обязательна, так как виджет использует нативный OpenGL для рисования.
